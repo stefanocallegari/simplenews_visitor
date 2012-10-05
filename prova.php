@@ -35,7 +35,7 @@
  *
  * Date: oggi
  * File: questo
- * Autor: io e me
+ * Autor: io e me e l'altro
  */
  
  # prova modifica
