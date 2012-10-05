@@ -1,0 +1,10 @@
+; $Id: simplenews_visitor.info,v 0.1.1.1 2011/05/10 15:15:50 Exp $
+name = "Simplenews Visitor"
+description = "Extends Simplenews by providing a visitor reply by user."
+dependencies[] = simplenews
+dependencies[] = mimemail
+dependencies[] = simplenews_realname
+dependencies[] = term_permissions
+package = Mail
+core = 6.x
+project = "simplenews_visitor"

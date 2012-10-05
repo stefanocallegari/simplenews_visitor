@@ -1,0 +1,1350 @@
+<?php 
+// $Id: simplenews_visitor.info,v 0.1.0.1 2011/05/10 15:15:50 Exp $
+
+/** SC 
+ * Copyright (c) 2011, Stefano Callegari
+ *
+ * All rights reserved.
+ *
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *
+ * o Redistributions of source code must retain the above copyright
+ *   notice, this list of conditions and the following disclaimer.
+ *
+ * o Redistributions in binary form must reproduce the above copyright
+ *   notice, this list of conditions and the following disclaimer in the
+ *   documentation and/or other materials provided with the distribution.
+ *
+ * o The names of the authors may not be used to endorse or promote
+ *   products derived from this software without specific prior written
+ *   permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+ * OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+ * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+ * LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * Date: 18/mag/2011 16.42.55
+ * File: simplenews_visitor.module
+ * Autor: stefano
+ */
+
+define('REGEX_VISITOR_NEW_URL', "|(<a.*href\s*=\s*[\"']?)([^\s>\"']+)([\"'].*>)([^<]+)(<.*>)?</a>|ie");
+define('REGEX_VISITOR_NEW_URL_FUNC', "_simplenews_visitor_new_url(\"$1\",\"$2\",\"$3\",\"$4\",\"$5\",\$to,\$node_id)");
+
+/** SC 18/mag/2011 16.44.26 stefano
+ * hook_help()
+ */ 
+function simplenews_visitor_help($path, $arg) {
+    $help = "";
+    
+    switch ($path) {
+        case 'admin/help#simplenews_visitor':
+            $help = "<p>". t('Simplenews Visitor allows you to collect newsletters visitors by following the links in the newsletter.') ."</p>";
+            return $help;
+        case 'admin/settings/simplenews/visitor':
+            $help = "<p>".t('The values of <i>Max amount</i> will be:')."</p>";
+            $help .= "<ul>";
+            $help .= "<li>".t('< 0 not configured (don\'t sends);')."</li>";
+            $help .= "<li>".t('= 0 without limit (sends anyway);')."</li>";
+            $help .= "<li>".t('> 0 with limit (sends until less max).')."</li>";
+            $help .= "</ul>";
+            return $help;
+        case 'admin/content/simplenews/users':
+            if (user_access('administer simplenews visitor subscription')) {
+                $help = "<p>".t('To manage the subscriptions list select a newsletter first and press "Filter". Also you can filter an email (or only a part).')."</p>";
+                $help .= "<p>".t('The update action are limited only to your members.')."</p>";
+                $help .= "<p>".t('Both <i>activate</i> and <i>inactivate</i> work on all newsletters.')."</p>";
+                $help .= "<p>".t('<i>Unsubscribe</i> remove the member/s only on the selected newsletter (or all).')."</p>";
+            }
+            return $help;
+        case 'admin/content/simplenews/users/import':
+            if (user_access('administer simplenews visitor subscription')) {
+                $help = "<p>".t('<i>Subscribe</i> add the member/s on the selected newsletter (or all).')."</p>";
+                $help .= "<p>".t('If a member exists on the database, it will overwrite the real name.')."</p>";
+            }
+            return $help;
+        case 'admin/content/simplenews/users/unsubscribe':
+            if (user_access('administer simplenews visitor subscription')) {
+                $help = "<p>".t('<i>Unsubscribe</i> remove the member/s only on the selected newsletter (or all).')."</p>";
+            }
+            return $help;
+            /* case '':
+            $help = "<p>".t('')."</p>";
+            return $help; */
+    }
+}
+
+/** SC 25/mag/2011 13.07.05 stefano
+ * 
+ * hook_perm()
+ * 
+ */
+function simplenews_visitor_perm() {
+    return array('newsletter visitor resend', 
+        'administer simplenews visitor subscription', 
+        'administer simplenews visitor statistic', 
+        'send newsletter visitor', 
+        'newsletter visitor admin setting'
+    );
+}
+
+/** SC 18/mag/2011 18.11.16 stefano
+ * hook_nodeapi()
+ * 
+ * url search to change it
+ */
+function simplenews_visitor_nodeapi(&$node, $op, $teaser, $page) {
+
+    // Operate only on node types set in 'simplenews_content_types' variable.
+    if (!in_array($node->type, variable_get('simplenews_content_types', array('simplenews')))) {
+        return;
+    }
+
+    switch ($op) {
+        case 'alter':
+            // Don't replace the tokens when node alter is called by simplenews_mail.
+            if (!isset($node->simplenews_mail) && $node->type == "simplenews") {
+                if (isset($node->body)) {
+                    global $user;
+                    
+                    $node_id = $node->nid;
+                    $to = $user->mail;
+                    
+                    $node->body = preg_replace(REGEX_VISITOR_NEW_URL, REGEX_VISITOR_NEW_URL_FUNC, $node->body);
+                }
+            }
+            
+            break;
+        case 'insert':
+        case 'update':
+            /** SC 27/giu/2011 18.01.31 stefano
+             * per gli utenti rivede i permessi  
+             */
+            $node->simplenews = _simplenews_flatten_array($node->simplenews);
+
+            $send_with_permission = $node->simplenews['send'] == SIMPLENEWS_COMMAND_SEND_NOW && user_access('send newsletter visitor');
+            if ($op == 'insert') {
+                // Insert node
+                $s_status = $send_with_permission ? SIMPLENEWS_STATUS_SEND_PENDING : SIMPLENEWS_STATUS_SEND_NOT;
+                db_query("UPDATE {simplenews_newsletters} SET s_status = %d WHERE nid = %d", $s_status, $node->nid);
+            } else if ($send_with_permission) {
+                db_query("UPDATE {simplenews_newsletters} SET vid = %d, tid = %d, s_status = %d, s_format = '%s', priority = %d, receipt = %d WHERE nid = %d",
+                    $node->vid, $node->simplenews['tid'], SIMPLENEWS_STATUS_SEND_PENDING, $node->simplenews['s_format'], $node->simplenews['priority'], $node->simplenews['receipt'], $node->nid);
+            }
+
+            // When this node is selected for translation all translation of this node
+            // will be sent too.
+            // All translated nodes will receive the same send states (priority, confirmation, format).
+            if (module_exists('translation') && translation_supported_type($node->type) && $send_with_permission) {
+                if ($translations = translation_node_get_translations($node->tnid))  {
+                    foreach ($translations as $translation) {
+                        db_query("UPDATE {simplenews_newsletters} SET s_status = %d, s_format = '%s', priority = %d, receipt = %d WHERE nid = %d",
+                            SIMPLENEWS_STATUS_SEND_PENDING, $node->simplenews['s_format'], $node->simplenews['priority'], $node->simplenews['receipt'], $translation->nid);
+                    }
+                }
+            }
+
+            // Send newsletter or test newsletter
+            if ($send_with_permission) {
+                // Send newsletter to all subscribers
+                /** SC 27/giu/2011 18:13:21 stefano
+                 * send newsletter only to user subscripted
+                 */
+                $mails = array();
+                
+                $result = db_query('SELECT t.snid FROM {simplenews_subscriptions} s INNER JOIN {simplenews_snid_tid} t ON s.snid = t.snid WHERE s.activated = %d AND t.activated = %d AND t.tid = %d', 1, 1, $node->simplenews['tid']);
+                while ($account = db_fetch_object($result)) {
+                    $mails[]->snid = $account->snid;
+                }
+                
+                /** SC 29/giu/2011 15:38:50 stefano
+                 * check if have availability
+                 */
+                if (_simplenews_visitor_check_max($node, count($mails))) {
+                    simplenews_send_node($node, $mails);
+                }
+            }
+            break;
+
+    }
+}
+
+/** SC 29/giu/2011 12:54:01 stefano
+ * 
+ * hook_taxonomy()
+ * 
+ */
+function simplenews_visitor_taxonomy($op, $type, $term = NULL) {
+
+    /** SC 29/giu/2011 13:02:58 stefano
+     * insert max limit sent
+     */
+    if ($term['vid'] == variable_get('simplenews_vid', '') && $type == 'term') {
+        switch ($op) {
+            case 'insert':
+                $object = array('tid' => $term['tid']);
+
+                drupal_write_record('simplenews_visitor_max_sent', $object);
+
+                break;
+            case 'delete':
+                db_query('DELETE FROM {simplenews_visitor_max_sent} WHERE tid = %d', $term['tid']);
+                
+                break;
+        }
+    }
+}
+
+/** SC 24/mag/2011 09.24.11 stefano
+ *
+ * hook_mail_alter()
+ * 
+ * Change inside <a>...</a> and add the references
+ * to user and newsletter
+ * 
+ */
+function simplenews_visitor_mail_alter(&$message) {
+    
+    if (strpos($message['id'], 'simplenews') !== FALSE) {
+        
+        $node_id = $message['params']['context']['node']->nid;
+        $to = isset($message['params']['context']['account']) ? $message['params']['context']['account']->mail : $message['to'];
+
+        #$regex = "|(<a.*href\s*=\s*[\"']?)([^\s>\"']+)([\"']?)>(.+)</a>|ie";
+        #$func_regex = "_simplenews_visitor_new_url(\"$1\",\"$2\",\"$3\",\"$4\",\$to,\$node_id)";
+        
+        if (is_array($message['body'])) {
+            $message['body']['body'] = preg_replace(REGEX_VISITOR_NEW_URL, REGEX_VISITOR_NEW_URL_FUNC, $message['body']['body']);;
+        }
+        else {
+            $message['body'] = preg_replace(REGEX_VISITOR_NEW_URL, REGEX_VISITOR_NEW_URL_FUNC, $message['body']);;
+        }
+
+    }
+}
+
+/** SC 24/mag/2011 09.41.17 stefano
+ * 
+ * hook_menu()
+ * 
+ */
+function simplenews_visitor_menu() {
+    $items = array();
+    
+    $items['redirect/%/%/%/%'] = array(
+        'title' => 'Newsletter',
+        'type' => MENU_CALLBACK,
+        'page callback' => 'simplenews_visitor_redirect',
+        'page arguments' => array(1,2,3,4),
+        'access callback' => '_simplenews_visitor_redirect_menu',
+        'access arguments' => array(1),
+        #'file path' => drupal_get_path('module', 'system'),
+    );
+    
+     $items['node/%node/visitor/by_email'] = array(
+         'title' => 'By email',
+         'page callback' => 'simplenews_visitor_listby',
+         'page arguments' => array(1,3),
+         'access callback' => '_simplenews_visitor_listby_access',
+         'access arguments' => array(1),
+         'weight' => 1,
+         #'file' => 'node.pages.inc',
+         'type' => MENU_DEFAULT_LOCAL_TASK,
+    );
+    
+    /** SC 14/giu/2011 10.46.38 stefano
+     * crea i submenu con l'ordinamento
+     */
+    $weight = 2;
+    $visitor_by = array('by_date' => 'By date',
+                        'by_url' => 'By url',
+                        'most_email' => 'Group email',
+                        'most_url' => 'Group url',
+                        #'reverse_email' => 'No visitors',
+                       );
+    
+    foreach ($visitor_by as $key => $value) {
+        $items['node/%node/visitor/'.$key] = array(
+             'title' => $value,
+             'page callback' => 'simplenews_visitor_listby',
+             'page arguments' => array(1,3),
+             'access callback' => '_simplenews_visitor_listby_access',
+             'access arguments' => array(1),
+             'weight' => $weight++,
+             #'file' => 'node.pages.inc',
+             'type' => MENU_LOCAL_TASK,
+        );
+    }
+    
+    $items['node/%node/visitor/reverse_email'] = array(
+        'title' => 'No visitors',
+        #'page callback' => 'simplenews_visitor_listby_no_visitor',
+        #'page arguments' => array(1),
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('simplenews_visitor_listby_no_visitor', 1),
+        'access callback' => '_simplenews_visitor_listby_access',
+        'access arguments' => array(1),
+        'weight' => $weight++,
+        #'file' => 'node.pages.inc',
+        'type' => MENU_LOCAL_TASK,
+    );
+
+    $items['admin/content/simplenews/visitor/resend/%node'] = array(
+        'title' => 'Newsletter',
+        'type' => MENU_CALLBACK,
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('simplenews_visitor_resend',5),
+        #'access callback' => '_simplenews_visitor_listby_access',
+        #'access arguments' => array(5),
+        'access arguments' => array('newsletter visitor resend'),
+        #'file path' => drupal_get_path('module', 'system'),
+    );
+
+    $items['admin/settings/simplenews/visitor'] = array(
+        'title' => 'Visitor',
+        'description' => 'Newsletter visitor management.',
+        'type' => MENU_NORMAL_ITEM,
+        'page callback' => 'drupal_get_form',
+        'page arguments' => array('simplenews_visitor_admin_setting'),
+        'access arguments' => array('newsletter visitor admin setting'),
+        #'file' => 'simplenews.admin.inc',
+        'weight' => -7,
+    );
+
+    
+    return $items;
+}
+
+/** SC 28/giu/2011 00:27:30 stefano
+ * 
+ * Setting simplenews visitor
+ * 
+ * @param array $form_state
+ * @return the form structure
+ */
+function simplenews_visitor_admin_setting (&$form_state) {
+    
+    $limits = 20;
+    
+    $options = array('' => t('- Please choose -'));
+    
+    $header = array(
+        array('data' => t('Newsletter'), 'field' => 'name', 'sort' => 'asc'),
+        array('data' => t('Max'), 'field' => 'max'),
+        array('data' => t('Used'), 'field' => 'amount'),
+    );
+
+    $query = sprintf('SELECT m.max, m.amount, t.tid, t.name FROM {term_data} t LEFT JOIN {simplenews_visitor_max_sent} m ON m.tid = t.tid LEFT JOIN {vocabulary_node_types} v ON v.vid = t.vid WHERE v.type = "%s"', 'simplenews');
+
+    $query .= tablesort_sql($header);
+    $result = pager_query($query, $limits, 0);    
+        
+    while ($row = db_fetch_object($result)) {   
+        
+        /* $form['name'][$row->tid] = array('#value' => $row->name);
+        $form['max'][$row->tid] = array('#value' => ($row->max ? $row->max : t('n/a')));
+        $form['amount'][$row->tid] = array('#value' => ($row->amount ? $row->amount : t('n/a'))); */
+        
+        $rows[] = array($row->name, ($row->max ? $row->max : t('n/a')), ($row->amount ? $row->amount : t('n/a')));
+        
+        $options[$row->tid] = $row->name;
+    }
+    
+    if ($pager = theme('pager', NULL, $limits, 0)) {
+        $rows[] = array(array('data' => $pager, 'colspan' => '3'));
+    }
+    if (!$rows) {
+        $rows[] = array(array('data' => t('No newsletters available.'), 'colspan' => '3'));
+    }
+
+    /* if ($vocabularies = taxonomy_get_vocabularies()) {
+        foreach ($vocabularies as $key => $object) {
+            $vocabulary_options[$key] = $object->name;
+        }
+    } */
+    
+    $form['simplenews_visitor_general_settings']['simplenews_tid'] = array(
+        '#type' => 'select',
+        '#title' => t('Newsletter'),
+        '#options' =>  $options,
+        '#required' => TRUE,
+        '#weight' => -15,
+        #'#description' => t('This vocabulary identifies newsletter series. Note that changing this vocabulary will require existing newsletters to be re-tagged and activated newsletter blocks to be re-activated.'),
+        #'#default_value' => variable_get('simplenews_vid', ''),
+    );
+    
+    $form['simplenews_visitor_general_settings']['max_sent'] = array(
+        '#type' => 'textfield',
+        '#size' => 5,
+        '#title' => t('Max amount to sent'),
+        '#required' => TRUE,
+        '#weight' => -14,
+        #'#default_value' => ,
+    );
+    
+    // Node type settings require pre-processing.
+    # $form['#validate'][]
+    $form['#submit'][] = 'simplenews_visitor_admin_setting_submit'; 
+    
+    #$form['pager'] = array('#value' => theme('pager', NULL, $limits, 0));
+    
+    $table = theme('table', $header, $rows);
+
+    $form['table'] = array('#value' => $table);
+    
+    return system_settings_form($form);
+    
+}
+
+function simplenews_visitor_admin_setting_validate ($form, &$form_state) {
+    if (!is_numeric($form_state['values']['max_sent'])
+        || floor($form_state['values']['max_sent']) != $form_state['values']['max_sent']) {
+        
+        form_set_error('max_sent', t('Max amount must be an integer'));
+    }
+}
+
+function simplenews_visitor_admin_setting_submit ($form, &$form_state) {
+    
+    $result = db_fetch_object(db_query('SELECT max, amount FROM {simplenews_visitor_max_sent} WHERE tid = %d', $form_state['values']['simplenews_tid']));
+    
+    $update = array(); 
+    
+    if ($result) {
+        
+        # update
+        $object = array(
+            'tid' => $form_state['values']['simplenews_tid'],
+            'max' => $form_state['values']['max_sent'],
+            'amount' => ($result->amount - $result->max),
+        );
+        
+        $update = 'tid';
+        
+    } else {
+        
+        # insert
+        $object = array(
+            'tid' => $form_state['values']['simplenews_tid'],
+            'max' => $form_state['values']['max_sent'],
+            'amount' => 0,
+        );
+        
+    }
+    
+    drupal_write_record('simplenews_visitor_max_sent', $object, $update);
+}
+
+/** SC 21/giu/2011 10.03.54 stefano
+ * hook_menu_alter()
+ * 
+ * Add the tab 
+ * 
+ */
+function simplenews_visitor_menu_alter (&$items) {
+    $items['node/%node/visitor'] = array(
+        'title' => 'Visitor',
+        'page callback' => 'simplenews_visitor_listby',
+        'page arguments' => array(1),
+        'access callback' => '_simplenews_visitor_listby_access',
+        'access arguments' => array(1),
+        'weight' => 1,
+        #'file' => 'node.pages.inc',
+        'type' => MENU_LOCAL_TASK,
+    );
+    
+}
+
+
+/** SC 21/giu/2011 10.05.25 stefano
+ * 
+ * Save the link visited and redirect
+ * to original url
+ * 
+ * @param int $nid the node/newsletter
+ * @param string $email user email
+ * @param string $url the coded url
+ * @param string $link the url's link 
+ */
+function simplenews_visitor_redirect($nid,$email,$url,$link) {
+    
+    $url = htmlspecialchars_decode(base64_decode($url));
+    
+    /** SC 24/mag/2011 10.29.46 stefano
+     * qui va la parte/funzione di registrazione
+     * della visita
+     */
+    $values = array("nid" => $nid,
+                    "mail" => $email,
+                    "url" => $url,
+                    "link" => $link,
+                    "date" => date("Y-m-d H:i:s"), 
+                   );
+    
+    drupal_write_record("simplenews_visitor", $values);
+    
+    
+    /** SC 24/mag/2011 10.30.38 stefano
+     * fa il redirect alla pagina voluta
+     */
+    drupal_goto($url);
+}
+
+
+/** SC 21/giu/2011 10.12.23 stefano
+ * 
+ * Enter description here ...
+ * @param object $node the node/newsletter
+ * @param string $by order by
+ */
+function simplenews_visitor_listby ($node, $by="by_email") {
+    $rows = array();
+    
+    switch ($by) {
+        case "by_email":
+            $order = "s.mail, s.date DESC";
+            $group_by = "";
+            $select = "s.mail, s.url, s.date, s.link";
+            $header = array(t('Subscribers'), t('Url'), t('Date'));
+            break;
+        case "by_date":
+            $order = "s.date DESC, s.mail";
+            $group_by = "";
+            $select = "s.mail, s.url, s.date, s.link";
+            $header = array(t('Subscribers'), t('Url'), t('Date'));
+            break;
+        case "by_url":
+            $order = "s.link, s.url, s.date DESC";
+            $group_by = "";
+            $select = "s.mail, s.url, s.date, s.link";
+            $header = array(t('Subscribers'), t('Url'), t('Date'));
+            break;
+        case "most_email":
+            $order = "group_mail DESC";
+            $group_by = "GROUP BY s.mail";
+            $select = "s.mail, count(s.mail) AS group_mail";
+            $header = array(t('Subscribers'), t('Url visited'));
+            break;
+        case "most_url":
+            $order = "group_url DESC";
+            $group_by = "GROUP BY s.url";
+            $select = "s.url, count(s.url) AS group_url, s.link";
+            $header = array(t('Url'), t('from Subscribers'));
+            break;
+        case "reverse_email":
+            $order = "s.mail";
+            $group_by = "";
+            $select = "s.mail";
+            $header = array(t('Subscribers'), t('Resend'));
+            break;
+    }
+
+    if ($by == "reverse_email") {
+        $result = db_query('SELECT %s FROM simplenews_subscriptions AS s LEFT JOIN simplenews_snid_tid AS t ON (s.snid = t.snid) LEFT JOIN simplenews_newsletters AS n ON (n.tid = t.tid) WHERE n.nid = %d AND s.mail NOT IN (SELECT v.mail FROM simplenews_visitor AS v WHERE v.nid = %d) %s ORDER BY %s', $select, $node->nid, $node->nid, $group_by, $order);
+    } else {
+        $result = db_query('SELECT %s FROM {simplenews_visitor} s WHERE s.nid = %d %s ORDER BY %s', $select, $node->nid, $group_by, $order);
+    }
+    
+    while ($row = db_fetch_array($result)) {
+    
+        switch ($by) {
+            case "most_email":
+                $rows[] = array(check_plain($row['mail']), $row['group_mail']);
+                break;
+            case "most_url":
+                $rows[] = array(l((!empty($row['link']) ? $row['link'] : $row['url']), $row['url']), $row['group_url']);
+                break;
+            case "reverse_email":
+                $rows[] = array(check_plain($row['mail']), "");
+                break;
+            default:
+                $rows[] = array(check_plain($row['mail']), l((!empty($row['link']) ? $row['link'] : $row['url']), $row['url']), $row['date']);
+                break;
+        }
+    
+    }
+
+    return theme('table', $header, $rows);
+}
+
+
+/** SC 21/giu/2011 10.14.36 stefano
+ * 
+ * hook_theme()
+ * 
+ */
+function simplenews_visitor_theme($existing, $type, $theme, $path) {
+    return array(
+        'simplenews_visitor_listby_no_visitor' => array(
+            'arguments' => array('form' => NULL)
+        ),
+        /* 'simplenews_visitor_admin_setting' => array(
+            'arguments' => array('form' => NULL)
+        ), */
+    );
+}
+
+
+/** SC 21/giu/2011 10.15.03 stefano
+ * 
+ * hook_theme()
+ * 
+ * collect data
+ * 
+ * @param array $form_state post result
+ * @param object $node the node/newsletter
+ */
+function simplenews_visitor_listby_no_visitor ($form_state, $node) {
+        
+    global $user;
+    
+    $disabled = array();
+    
+    #$order = "s.mail";
+    #$group_by = "";
+    $select = "s.mail, s.snid, t.activated";
+    
+    /** SC 24/giu/2011 16.35.26 stefano
+     * only own newsletter
+     * only if activated globaly
+     */
+    $query = sprintf('SELECT %s 
+                      FROM {simplenews_subscriptions} AS s 
+                        LEFT JOIN {simplenews_snid_tid} AS t ON (s.snid = t.snid) 
+                        LEFT JOIN {simplenews_newsletters} AS n ON (n.tid = t.tid) 
+                      WHERE n.nid = %d 
+                        AND s.mail NOT IN (select v.mail from {simplenews_visitor} AS v where v.nid = %d) 
+                        AND (%d = 1 OR t.tid IN (select tpu.tid from {term_permissions_user} tpu where tpu.uid = %d) OR t.tid IN (select tpr.tid from {term_permissions_role} tpr where tpr.rid IN (%s)))
+                        AND s.activated = 1'
+    , $select, $node->nid, $node->nid, $user->uid, $user->uid, implode(',', array_keys($user->roles)));
+        
+    /** SC 17/giu/2011 17.37.52 stefano
+     * pager...
+     */
+    $limit = 25;
+    
+    $header = array(
+        '',
+        array('data' => t('Subscribers'),'field' => 'mail', 'sort' => 'ASC')
+    );
+    
+    $tablesort = tablesort_sql($header);
+    
+    $result = pager_query($query.$tablesort, $limit);
+    
+    $form = array();
+    while($item = db_fetch_object($result)) {
+
+        /*Add each user id to my checkboxes array.
+         Only keys, no values */
+        $checkboxes[$item->snid] = '';
+         
+        // You need unique keys for each user, so I use user id
+        $form['mail'][$item->snid] = array(
+            '#value' => check_plain($item->mail)
+        );
+        
+        /** SC 27/giu/2011 12.23.33 stefano
+         * disabilita i check che non sono abilitati
+         */
+        if (!$item->activated) {
+            $disabled[] = $item->snid;
+        }
+         
+    }
+     
+    $form['checkboxes'] = array(
+        '#type' => 'checkboxes', 
+        '#options' => $checkboxes, 
+        '#process' => array(
+            'expand_checkboxes',
+            'simplenews_visitor_disable_check',),
+        '#disabled_mail' => $disabled,
+        '#disabled' => (!user_access('newsletter visitor resend') ? TRUE : FALSE),
+    );
+    
+    $form['pager'] = array('#value' => theme('pager', NULL, $limit, 0));
+    
+    if (!user_access('newsletter visitor resend')) {
+        drupal_set_message(t("Your account doesn't have permission to select any of the subscriber."), 'warning');
+    }
+     
+    return $form;
+
+}
+
+
+/** SC 27/giu/2011 19:31:55 stefano
+ * 
+ * applica disabled alle singole voci di un checkboxes
+ * 
+ * @param unknown_type $form
+ * @param unknown_type $edit
+ */
+function simplenews_visitor_disable_check ($form, $edit) {
+
+    foreach ($form['#disabled_mail'] as $key) {
+        $form[$key]['#attributes'] = array(
+            'disabled' => 'disabled',
+            #'class' => 'admin-disabled',
+        );
+    }
+
+    return $form;
+}
+
+
+/** SC 21/giu/2011 10.17.31 stefano
+ * 
+ * hook_theme()
+ * 
+ * show the page
+ * 
+ * Enter description here ...
+ * @param array $form the form components
+ */
+function theme_simplenews_visitor_listby_no_visitor ($form) {
+    
+    /** SC 20/giu/2011 15.16.33 stefano
+     * modifica del form per rilanciare l'invio 
+     * ai selezionati
+     */
+    #$form['#action'] = url('admin/content/simplenews/visitor/resend');
+    $form['submit'] = array('#type' => 'submit', '#value' => t('Resend'));
+    
+    $header = array(
+        (user_access('newsletter visitor resend') ? theme('table_select_header_cell') : ''), //using that previously empty field
+        array('data' => t('Subscribers'),'field' => 'mail', 'sort' => 'ASC'),
+    );
+
+    if(!empty($form['checkboxes']['#options'])) {
+        foreach (element_children($form['mail']) as $key) {
+            $rows[] = array(
+                drupal_render($form['checkboxes'][$key]),
+                drupal_render($form['mail'][$key]),
+            );
+        }
+    } else {
+        $rows[] = array(array('data' => t('No users found'), 'colspan' => 3));
+    }
+    
+    $output .= theme('table', $header, $rows);
+    if ($form['pager']['#value']) {
+        $output .= drupal_render($form['pager']);
+    }
+
+    $output .= drupal_render($form);
+    return $output;
+    
+}
+
+
+/** SC 21/giu/2011 10.20.03 stefano
+ * 
+ * hook_form_alter()
+ * 
+ * change the action
+ * 
+ * @param array $form the form components
+ * @param array $form_state post result
+ * @param string $form_id form id
+ */
+function simplenews_visitor_form_alter (&$form, $form_state, $form_id) {
+
+    global $user;
+    
+    if ($form_id == "simplenews_visitor_listby_no_visitor") {
+        $form['#action'] = url('admin/content/simplenews/visitor/resend/'.$form['#parameters'][2]->nid);
+    }
+    
+    /** SC 27/giu/2011 18:46:43 stefano
+     * attivazione perm 'send newsletter visitor'
+     */
+    if (user_access('send newsletter visitor') 
+        && isset($form['type']) 
+        && isset($form['#node']) 
+        && strpos($form_id, '_node_form') 
+        && in_array($form['type']['#value'], variable_get('simplenews_content_types', array('simplenews')))) {
+        
+        $options[SIMPLENEWS_COMMAND_SEND_NONE] = t("Don't send now");
+        $options[SIMPLENEWS_COMMAND_SEND_TEST] = t('Send one test newsletter to the test address');
+        $options[SIMPLENEWS_COMMAND_SEND_NOW] = t('Send newsletter');
+        $form['simplenews']['send'] = array(
+            '#type' => 'radios',
+            '#title' => t('Send action'),
+            '#default_value' => isset($simplenews_values['send']) ? $simplenews_values['send'] : variable_get('simplenews_send', SIMPLENEWS_COMMAND_SEND_NONE),
+            '#options' => $options,
+            '#attributes' => array('class' => 'simplenews-command-send'),
+        );
+
+    }
+    
+    /** SC 22/giu/2011 09.51.57 stefano
+     * uso di term permissions per bloccare
+     * le newsletter ai gruppi/utenti
+     */
+    /** SC 22/giu/2011 13.22.43 stefano
+     * elenco newsletter taxonomy
+     */
+    if ($form_id == "simplenews_admin_types_form") {
+        
+        if (term_permissions_allowed($form['tid']['#value'], $user)) {
+            
+        } else {
+            $vocabulary = taxonomy_get_vocabularies();
+            
+            drupal_set_message(t("Your account doesn't have permission to use any of the terms in the %vocabulary vocabulary. Your account must be given permission to use at least one term in the %vocabulary vocabulary.", array('%vocabulary' => $form['name']['#default_value'])), 'warning');
+            watchdog('term_permissions'
+                , '%user was blocked from accessing the %content-type form as they do not have permission to use any terms in the <a href="@vocabulary-url">%vocabulary</a> vocabulary.'
+                , array('%user' => isset($user->name) ? $user->name : variable_get('anonymous', 'Anonymous'), '%content-type' => $vocabulary[$form['vid']['#value']]->name, '@vocabulary-url' => url('admin/content/taxonomy/' . $form['vid']['#value']), '%vocabulary' => $form['name']['#default_value'])
+                , WATCHDOG_WARNING
+                , l(t('edit vocabulary'), 'admin/content/taxonomy/' . $form['vid']['#value'])
+                );
+            drupal_access_denied();
+            exit();
+        }
+        
+    }
+    
+    /** SC 22/giu/2011 21.54.59 stefano
+     * l'admin ha sempre i permessi
+     */
+    if ($user->uid == 1) {
+        return TRUE;
+    }
+
+    
+
+    /** SC 22/giu/2011 21.59.36 stefano
+     * non ci sono uid o rid nei controlli
+     */
+    if (!(db_result(db_query("SELECT count(1) FROM {term_permissions_user} tpu2 WHERE tpu2.uid = %d", $user->uid)) || db_result(db_query("SELECT count(1) FROM term_permissions_role tpr2 WHERE tpr2.rid IN (%s)", implode(',', array_keys($user->roles)))))) {
+        return TRUE;
+    }
+
+    /** SC 22/giu/2011 13.23.11 stefano
+     * sent issue
+     * draft issue
+     */
+    if ($form_id == "simplenews_admin_news") {
+        
+        $header = array(t('Title'), t('Newsletter'), t('Date created'), t('Published'), t('Sent'), t('Edit'));
+        
+        list($names, $queries) = array_values(simplenews_get_filter('simplenews_newsletters_filter'));
+        $filter = isset($_SESSION['simplenews_newsletters_filter']) ? $_SESSION['simplenews_newsletters_filter'] : 'all';
+        
+        foreach ($names as $key => $value) {
+            switch ($key) {
+                case 'all':
+                    $queries[$key] .= " AND (s.tid IN (SELECT tpu.tid FROM {term_permissions_user} tpu WHERE tpu.uid = ".$user->uid.") OR s.tid IN (SELECT tpr.tid FROM {term_permissions_role} tpr WHERE tpr.rid IN (".implode(',', array_keys($user->roles)).")))";
+                    break;
+                case 'na':
+                    unset($names[$key],$queries[$key]);
+                    break;
+                default:
+                    if (!term_permissions_allowed($key, $user)) {
+                        unset($names[$key],$queries[$key]);
+                    }
+                    break;
+            }
+        }
+
+        $queryfilter = isset($queries[$filter]) ? $queries[$filter] : '';
+        
+        $form['simplenews_issue_filter']['filter'] = array(
+            '#type' => 'select',
+            '#options' => $names,
+            '#default_value' => $filter,
+        );
+        
+        /** SC 22/giu/2011 17.29.42 stefano
+         * @see simplenews_admin_news in simplenews.admin.inc
+         */
+        switch ($form['#action']) {
+            case '/?q=admin/content/simplenews/sent': # sent
+                $query = "SELECT n.*, s.s_status FROM {node} n INNER JOIN {simplenews_newsletters} s ON n.nid = s.nid WHERE s.s_status > %d". $queryfilter ." ORDER BY n.created DESC";
+                $count_query = "SELECT COUNT(n.nid) FROM {node} n INNER JOIN {simplenews_newsletters} s ON n.nid = s.nid WHERE s.s_status > %d". $queryfilter;
+
+                break;
+            case '/?q=admin/content/simplenews/notsent': # draft
+                $query = "SELECT DISTINCT n.*, s.s_status FROM {node} n INNER JOIN {simplenews_newsletters} s ON n.nid = s.nid WHERE s.s_status = %d". $queryfilter ." ORDER BY n.created DESC";
+                $count_query = "SELECT COUNT(n.nid) FROM {node} n INNER JOIN {simplenews_newsletters} s ON n.nid = s.nid WHERE s.s_status = %d". $queryfilter;
+
+                break;
+        }
+        
+        $vid = variable_get('simplenews_vid', '');
+        $result = pager_query(db_rewrite_sql($query, 'n', 'nid', array(SIMPLENEWS_STATUS_SEND_NOT)), 10, 0, db_rewrite_sql($count_query, 'n', 'nid', array(SIMPLENEWS_STATUS_SEND_NOT)), 0);
+        $rows = array();
+        while ($node = db_fetch_object($result)) {
+            $terms = array_keys(taxonomy_node_get_terms_by_vocabulary($node, $vid, 'name'));
+            $rows[] = array(l($node->title, 'node/'. $node->nid),
+            isset($terms[0]) ? $terms[0] : t('n/a'),
+            format_date($node->created, 'small'),
+            theme('simplenews_status', $node->status, 'published'),
+            theme('simplenews_status', $node->s_status, 'sent'),
+            l(t('edit'), 'node/'. $node->nid .'/edit', array(), drupal_get_destination()));
+        }
+        if ($pager = theme('pager', NULL, 10, 0)) {
+            $rows[] = array(array('data' => $pager, 'colspan' => '6'));
+        }
+        if (!$rows) {
+            $rows[] = array(array('data' => t('No newsletters available.'), 'colspan' => '6'));
+        }
+
+        $table = theme('table', $header, $rows);
+
+        $form['table'] = array('#value' => $table);
+
+    }
+    
+    /** SC 22/giu/2011 22.18.07 stefano
+     * subscriptions list
+     */
+    if (user_access('administer simplenews visitor subscription')) {
+
+        if ($form_id == "simplenews_subscription_admin") {
+            
+            /** SC 23/giu/2011 10.53.46 stefano
+             * rimuove dal form i campi globali
+             */
+            unset ($form['admin']['options']['operation'], $form['admin']['snids']);
+            
+            $form['admin']['options']['operation'] = array(
+                '#type' => 'select',
+                '#options' => array(
+                    'activate' => t('Activate'),
+                    'inactivate' => t('Inactivate'),
+                    'unsubscribe' => t('Unsubscribe'),
+                    ),
+                '#default_value' => 'activate');
+        
+            /** SC 23/giu/2011 22.38.19 stefano
+             * cambio dell'action
+             */
+            $form['admin']['options']['submit']['#submit'] = array('simplenews_visitor_subscription_list_form_submit');
+            #$form['#action'] = "/?q=admin/content/simplenews_visitor/users";
+            
+            /** SC 23/giu/2011 11.02.10 stefano
+             * pulisce il filtro
+             */
+            $add_where_filters = "";
+            
+            foreach ($form['filters']['newsletter']['#options'] as $key => $value) {
+                
+                if ($key == 'all') {
+                    
+                    $add_where_filters = " AND (s.tid IN (SELECT tpu.tid FROM {term_permissions_user} tpu WHERE tpu.uid = ".$user->uid.") OR s.tid IN (SELECT tpr.tid FROM {term_permissions_role} tpr WHERE tpr.rid IN (".implode(',', array_keys($user->roles)).")))";
+                    continue;
+                }
+                
+                list($name, $tid) = explode('-', $key, 2);
+                
+                if (!term_permissions_allowed($tid, $user)) {
+                    unset($form['filters']['newsletter']['#options'][$key]);
+                }
+            } 
+            
+            /** SC 23/giu/2011 17.15.33 stefano
+             * @see simplenews.admin.inc simplenews_subscription_list_form()
+             */
+            // Table header. Used as tablesort default
+            $header = array(
+                array('data' => t('Email'), 'field' => 'ss.mail', 'sort' => 'asc'),
+                array('data' => t('Username'), 'field' => 'u.name'),
+                array('data' => t('Status'), 'field' => 's.activated'),
+                t('Operations')
+            );
+        
+            // Data collection with filter and sorting applied
+            $filter = simplenews_build_subscription_filter_query();
+            
+            /** SC 23/giu/2011 15.56.14 stefano
+             * il WHERE è in $filter
+             */
+            if (empty($filter['where'])) {
+                $add_where_filters = " WHERE 1".$add_where_filters;
+            }
+            
+            /** SC 24/giu/2011 16.07.01 stefano
+             * if email has inactivated globally is not show
+             */
+            $add_where_filters .= " AND ss.activated = 1";
+            
+            /** SC 23/giu/2011 17.14.52 stefano
+             * add realname module
+             */
+            /** SC 24/giu/2011 15.15.14 stefano
+             * add simplenews_snid_tid.activated
+             */
+            $query = 'SELECT DISTINCT ss.*, u.name, sr.realname, s.activated AS activated_tid FROM {simplenews_subscriptions} ss LEFT JOIN {users} u ON ss.uid = u.uid LEFT JOIN {simplenews_realname} sr ON ss.mail = sr.mail INNER JOIN {simplenews_snid_tid} s ON ss.snid = s.snid'. $filter['where'].$add_where_filters;
+        
+            // $count_query used to count distinct records only
+            $count_query = preg_replace('/SELECT.*?FROM /i', 'SELECT COUNT(DISTINCT ss.mail) FROM ', $query, 1);
+            $query .= tablesort_sql($header);
+            $result = pager_query($query, 30, 0, $count_query);
+        
+            $snids = array();
+            
+            unset($form['admin']['mail'],$form['admin']['name'],$form['admin']['status'],$form['admin']['operations'],$form['admin']['realname']);
+            
+            // Subscription table and table pager
+            while ($subscription = db_fetch_object($result)) {
+                $snids[$subscription->snid] = '';
+                $form['admin']['mail'][$subscription->snid] = array('#value' => $subscription->mail);
+                $form['admin']['name'][$subscription->snid] =  array('#value' => isset($subscription->uid) ? l($subscription->name, 'user/'. $subscription->uid) : $subscription->name);
+                /** SC 24/giu/2011 15.14.14 stefano
+                 * active only if both
+                 */
+                $form['admin']['status'][$subscription->snid] = array('#value' => theme('simplenews_status', ($subscription->activated && $subscription->activated_tid ? 1 : 0), 'activated'));
+                $form['admin']['operations'][$subscription->snid] = array('#value' => l(t('edit'), 'admin/content/simplenews/users/edit/'. $subscription->snid, array(), drupal_get_destination()));
+                /** SC 23/giu/2011 17.15.17 stefano
+                 * realname
+                 */
+                $form['admin']['realname'][$subscription->snid] = array('#value' => $subscription->realname);
+            }
+            $form['admin']['snids'] = array('#type' => 'checkboxes', '#options' => $snids);
+            $form['admin']['pager'] = array('#value' => theme('pager', NULL, 30, 0));
+        
+        }
+        
+        /** SC 22/giu/2011 22.18.28 stefano
+         * subscriptions mass subscribe
+         */
+        if ($form_id == "simplenews_subscription_list_add"
+            || $form_id == "simplenews_subscription_list_export"
+            || $form_id == "simplenews_subscription_list_remove"
+            ) {
+        
+            $newsletters = array();
+            foreach (taxonomy_get_tree(variable_get('simplenews_vid', '')) as $newsletter) {
+                
+                /** SC 22/giu/2011 22.50.01 stefano
+                 * verifica i permessi
+                 */
+                if (term_permissions_allowed($newsletter->tid, $user)) {
+                    $newsletters[$newsletter->tid] = check_plain($newsletter->name);
+                }
+            }
+            
+            
+            
+            $form['newsletters'] = array(
+                '#type' => 'checkboxes',
+                '#title' => t('Subscribe to'),
+                '#options' => $newsletters,
+                '#required' => TRUE,
+            );
+        
+            /** SC 22/giu/2011 22.20.07 stefano
+             * subscriptions export
+             */
+            if ($form_id == "simplenews_subscription_list_export") {
+                $form['newsletters'] = array_merge($form['newsletters'], array('#description' => t('Subscriptions matching the selected newsletters will be exported.'), '#title' => t('Subscribed to')));
+                $form['#after_build'] = array('simplenews_visitor_realname_admin_export_after_build');
+            }
+            
+            /** SC 22/giu/2011 22.19.34 stefano
+             * subscriptions mass unsubscribe
+             */
+            if ($form_id == "simplenews_subscription_list_remove") {
+                $form['newsletters'] = array_merge($form['newsletters'], array('#title' => t('Unsubscribe from')));
+            }
+            
+        }
+        
+        /** SC 23/giu/2011 17.49.15 stefano
+         * Subscriptions user
+         */
+        if ($form_id == "simplenews_admin_users_form") {
+            
+            foreach ($form['subscriptions']['newsletters']['#options'] as $key => $value) {
+                if (!term_permissions_allowed($key, $user)) {
+                    
+                    /** SC 23/giu/2011 18.07.42 stefano
+                     * rimuove comunque l'utente se iscritto
+                     */
+                    simplenews_unsubscribe_user($form['subscriptions']['mail']['#value'], $key, FALSE);
+                    
+                    unset($form['subscriptions']['newsletters']['#options'][$key]);
+                }
+            }
+        }
+    }
+    
+}
+
+
+/** SC 24/giu/2011 12.16.12 stefano
+ * 
+ * @see simplenews.admin.inc simplenews_subscription_list_form()
+ * 
+ * @param array $form
+ * @param array $form_state
+ */
+function simplenews_visitor_subscription_list_form_submit($form, &$form_state) {
+
+    if (isset($form_state['values']['operation'])) {
+        $snids = array_filter($form_state['values']['snids']);
+        $args = array($snids);
+        switch ($form_state['values']['operation']) {
+            case 'activate':
+                call_user_func_array('simplenews_visitor_activate_subscription', $args);
+                drupal_set_message(t('The update has been performed.'));
+                break;
+            case 'inactivate':
+                call_user_func_array('simplenews_visitor_inactivate_subscription', $args);
+                drupal_set_message(t('The update has been performed.'));
+                break;
+            case 'unsubscribe':
+                
+                /** SC 24/giu/2011 10.42.28 stefano
+                 * unsubscribe only own newsletter
+                 */
+                global $user;
+                
+                foreach ($snids as $value) {
+                    
+                    $mail = db_result(db_query("SELECT s.mail FROM {simplenews_subscriptions} s WHERE s.snid = %d", $value));
+                    
+                    if ($form_state['values']['newsletter'] == 'all') {
+
+                        $result = db_query("SELECT tpu.tid FROM {term_permissions_user} tpu WHERE tpu.uid = %d UNION SELECT tpr.tid FROM term_permissions_role tpr WHERE tpr.rid IN (%s)", $user->uid, implode(',', array_keys($user->roles)));
+                        
+                        while ($row = db_fetch_array($result)) {
+                            
+                            simplenews_unsubscribe_user($mail, $row['tid'], FALSE);
+                        }
+                        
+                    } else {
+
+                        list($name, $tid) = explode('-', $form_state['values']['newsletter'], 2);
+                        
+                        simplenews_unsubscribe_user($mail, $tid, FALSE);
+                    }
+                }
+                drupal_set_message(t('The update has been performed.'));
+                break;
+        }
+    }
+}
+
+
+/** SC 24/giu/2011 12.21.53 stefano
+ * 
+ * @see simplenews_realname.module simplenews_realname_admin_export_after_build()
+ * 
+ * @param unknown_type $form
+ * @param unknown_type $form_element
+ */
+function simplenews_visitor_realname_admin_export_after_build($form, $form_element) {
+  if (isset($form_element['values']['op']) && $form_element['values']['op'] == t('Export')) {
+    $states = array_filter($form_element['values']['states']);
+    $newsletters = array_filter($form_element['values']['newsletters']);
+
+    // Build where clause for active/inactive state and newsletter selection.
+    /** SC 24/giu/2011 12.43.17 stefano
+     * 
+     */
+    if (isset($states['active'])) {
+      $where[] = '(s.activated = 1 AND t.activated = 1)';
+    }
+    if (isset($states['inactive'])) {
+      $where[] = '(s.activated = 0 OR t.activated = 0)';
+    }
+    $where = isset($where) ? implode(' OR ', $where) : NULL;
+    if ($tree = taxonomy_get_tree(variable_get('simplenews_vid', ''))) {
+      foreach ($tree as $newsletter) {
+        if (isset($newsletters[$newsletter->tid])) {
+          $where_tid[] = 't.tid = '. $newsletter->tid;
+        }
+      }
+    }
+    $where_tid = isset($where_tid) ? implode(' OR ', $where_tid) : NULL;
+
+    // Get subscription data
+    if (isset($where) && isset($where_tid)) {
+      $query = '
+        SELECT DISTINCT r.realname, s.mail
+        FROM {simplenews_realname} r
+        INNER JOIN {simplenews_subscriptions} s ON r.mail = s.mail
+        INNER JOIN {simplenews_snid_tid} t ON s.snid = t.snid
+        WHERE ('. $where .') AND ('. $where_tid .')';
+      $result = db_query($query);
+      while ($item = db_fetch_array($result)) {
+        $items[] = implode(";", $item);
+      }
+    }
+
+    // Build form field containing exported emails.
+    // The field will be included in the form where at the ['emails'] place holder.
+    if (isset($items)) {
+      $exported_items = implode("\n", $items);
+    }
+    else {
+      $exported_items .= t('No addresses were found.');
+    }
+    $form['emails'] = array(
+      '#type' => 'textarea',
+      '#title' => t('Export results'),
+      '#cols' => 60,
+      '#rows' => 5,
+      '#value' => $exported_items,
+    );
+  }
+  return $form;
+}
+
+
+/**
+ * Callback function to activate the specified subscriptions.
+ * 
+ * @see simplenews.admin.inc simplenews_activate_subscription()
+ *
+ * @param $snid array of snid's
+ */
+function simplenews_visitor_activate_subscription($snid) {
+    
+    global $user;
+    
+    $add_where_filters = " AND (tid IN (SELECT tpu.tid FROM {term_permissions_user} tpu WHERE tpu.uid = ".$user->uid.") OR tid IN (SELECT tpr.tid FROM {term_permissions_role} tpr WHERE tpr.rid IN (".implode(',', array_keys($user->roles)).")))";
+    
+    db_query('UPDATE {simplenews_snid_tid} SET activated = %d WHERE snid IN('. db_placeholders($snid, 'int') .')'.$add_where_filters, array_merge(array('1'), $snid));
+}
+
+
+/**
+ * Callback function to inactivate the specified subscriptions.
+ * 
+ * @see simplenews.admin.inc simplenews_inactivate_subscription()
+ *
+ * @param $snid array of snid's
+ */
+function simplenews_visitor_inactivate_subscription($snid) {
+    
+    global $user;
+    
+    $add_where_filters = " AND (tid IN (SELECT tpu.tid FROM {term_permissions_user} tpu WHERE tpu.uid = ".$user->uid.") OR tid IN (SELECT tpr.tid FROM {term_permissions_role} tpr WHERE tpr.rid IN (".implode(',', array_keys($user->roles)).")))";
+    
+    db_query('UPDATE {simplenews_snid_tid} SET activated = %d WHERE snid IN('. db_placeholders($snid, 'int') .')'.$add_where_filters, array_merge(array('0'), $snid));
+}
+
+
+/** SC 21/giu/2011 10.21.46 stefano
+ * 
+ * collect the email and resend the newsletter
+ * 
+ * @see simplenews simplenews_send_node()
+ * 
+ * @param array $form_state post result
+ * @param object $node the node/newsletter
+ */
+function simplenews_visitor_resend (&$form_state, $node) {
+    
+    foreach ($form_state['post']['checkboxes'] as $value) {
+        $mails[]->snid = $value;
+    }
+    
+    /** SC 29/giu/2011 15:38:50 stefano
+     * check if have availability
+     */
+    if (_simplenews_visitor_check_max($node, count($mails))) {
+        simplenews_send_node($node,$mails);
+    }
+    
+}
+
+
+/** SC 19/mag/2011 09.44.52 stefano
+ * 
+ * change the original url to the site and GET the newsletter data
+ * 
+ * 
+ * @param string $pre_url the first part regex
+ * @param string $url url regex
+ * @param string $end_url the last part regex
+ * @param string $link the link regex
+ * @param string $email user email
+ * @param int $nid id node/newsletter 
+ * @return string the new url
+ */
+function _simplenews_visitor_new_url($pre_url,$url,$end_url,$link,$end_link,$email,$nid) {
+    global $base_url;
+    
+    #return $pre_url.$base_url."/redirect.php?user=".urlencode($email)."&node=".$node."&url=".base64_encode($url).$end_url;
+    return $pre_url.$base_url."/?q=redirect/".$nid."/".rawurlencode($email)."/".base64_encode($url)."/".rawurlencode($link).$end_url.$link.$end_link."</a>";
+}
+
+
+/** SC 21/giu/2011 10.30.10 stefano
+ * 
+ * access callback
+ * 
+ * @param int $nid id node/newsletter
+ */
+function _simplenews_visitor_redirect_menu($nid) {
+    
+    $node = db_result(db_query("SELECT type FROM {node} WHERE nid = ".$nid));
+    
+    if (strpos($node, 'simplenews') !== FALSE) {   
+        return TRUE;
+    } else {
+        return FALSE;
+    }
+}
+
+
+/** SC 21/giu/2011 10.32.10 stefano
+ * 
+ * access callback
+ * 
+ * @param object $node the node/newsletter
+ */
+function _simplenews_visitor_listby_access($node) {
+    if (user_access('administer simplenews visitor statistic') && $node->type == "simplenews") {
+        return TRUE;
+    } else {
+        return FALSE;
+    }
+}
+
+/** SC 29/giu/2011 18:58:37 stefano
+ * 
+ * Check if there is availability to send the email
+ * 
+ * @param array $node the node
+ * @param int $count_mail the quantity of email to send
+ * @return boolean
+ */
+function _simplenews_visitor_check_max($node, $count_mail) {
+    
+    $term = taxonomy_get_term($node->simplenews['tid']);
+    
+    $result = db_fetch_object(db_query('SELECT max, amount FROM {simplenews_visitor_max_sent} WHERE tid = %d', $node->simplenews['tid']));
+    
+    if ($result->max < 0 || ($result->max > 0 && ($result->max - $result->amount - $count_mail) < 0 )) {
+        
+        db_query("UPDATE {simplenews_newsletters} SET s_status = %d WHERE nid = %d", SIMPLENEWS_STATUS_SEND_NOT, $node->nid);
+        
+        drupal_set_message(t('No more or insufficient availability to newsletter %newsletter.', array('%newsletter' => $term->name)));
+        drupal_set_message(t('Please add more availability to send the newsletter.'));
+        
+        return FALSE;
+    } elseif ($result->max > 0) {
+        db_query("UPDATE {simplenews_visitor_max_sent} SET amount = (amount + %d) WHERE tid = %d", $count_mail, $node->simplenews['tid']);
+    }
+    
+    return TRUE;
+}
+
